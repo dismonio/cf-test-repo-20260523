@@ -1,0 +1,38 @@
+name: Compile CyberFidget Firmware
+on:
+  workflow_dispatch:
+jobs:
+  build-platformio:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout user's code
+        uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          
+      - name: Install PlatformIO and esptool
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio
+          pip install esptool
+          
+      - name: Compile the firmware
+        env:
+          # Brand the binary as a per-user App Builder build. The firmware's
+          # generate_version.py picks this up and embeds type=user-build into
+          # the boot banner (and HAL::getFirmwareBuildType()), so each user's
+          # personalized binary is identifiable in serial output and bug reports.
+          CYBERFIDGET_BUILD_TYPE_OVERRIDE: user-build
+        run: pio run -e local
+
+      - name: Merge the firmware
+        run: |
+          esptool.py --chip esp32 merge_bin -o .pio/build/local/merged_firmware.bin           --flash_mode dio --flash_freq 80m --flash_size 8MB           0x1000 .pio/build/local/bootloader.bin           0x8000 .pio/build/local/partitions.bin           0x10000 .pio/build/local/firmware.bin
+          
+      - name: Upload merged firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: .pio/build/local/merged_firmware.bin

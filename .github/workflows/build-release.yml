@@ -1,0 +1,100 @@
+# =============================================================================
+# build-release.yml — Build firmware and attach binary to GitHub releases
+# =============================================================================
+# Trigger: Push a tag like v1.0, v2.3.1, etc.
+#
+# What it does:
+#   1. Builds firmware using PlatformIO (same as local build)
+#   2. merge_firmware.py runs automatically as a post-build script
+#   3. Attaches merged_firmware.bin to the GitHub release
+#
+# To create a release:
+#   git tag v1.0
+#   git push origin v1.0
+#   → Go to GitHub → Releases → Draft from tag → Publish
+#   → Or let this workflow create the release automatically
+# =============================================================================
+
+name: Build & Release Firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Override build type label (e.g. ci-nightly, beta)'
+        required: false
+        default: 'ci-nightly'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so generate_version.py can extract commit metadata
+
+      - name: Verify tag matches version.txt
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          TAG_VER="${TAG_VER%%-*}"   # strip -rc1/-alpha/-beta suffixes
+          FILE_VER=$(tr -d '[:space:]' < version.txt)
+          if [ "$TAG_VER" != "$FILE_VER" ]; then
+            echo "::error::tag $GITHUB_REF_NAME (parsed '$TAG_VER') does not match version.txt '$FILE_VER'"
+            echo "Bump version.txt to match the tag, or retag to match version.txt."
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches version.txt $FILE_VER ✓"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio esptool
+
+      - name: Build firmware
+        env:
+          # workflow_dispatch invocations brand their builds via this var.
+          # Tag-triggered builds leave it empty so generate_version.py picks
+          # "release" / "prerelease" / "ci-dev" from GITHUB_REF_NAME.
+          CYBERFIDGET_BUILD_TYPE_OVERRIDE: ${{ inputs.build_type || '' }}
+        run: pio run -e local
+
+      - name: Merge firmware binary
+        run: |
+          python -m esptool --chip esp32 merge_bin \
+            -o .pio/build/local/merged_firmware.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 8MB \
+            0x1000 .pio/build/local/bootloader.bin \
+            0x8000 .pio/build/local/partitions.bin \
+            0x10000 .pio/build/local/firmware.bin
+
+      - name: Verify merged binary exists
+        run: |
+          MERGED=".pio/build/local/merged_firmware.bin"
+          if [ ! -f "$MERGED" ]; then
+            echo "ERROR: merged_firmware.bin not found!"
+            echo "Contents of build dir:"
+            ls -la .pio/build/local/
+            exit 1
+          fi
+          echo "MERGED_PATH=$MERGED" >> "$GITHUB_ENV"
+          echo "Merged firmware: $(stat -c%s "$MERGED") bytes"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.MERGED_PATH }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
